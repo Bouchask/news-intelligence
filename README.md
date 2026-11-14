@@ -73,6 +73,58 @@ flowchart LR
 
 The detailed component diagram and data boundaries are in [docs/architecture.md](docs/architecture.md).
 
+### Dataset-to-model workflow
+
+```mermaid
+flowchart TD
+  Source[Licensed CSV or labeled category folders] --> Read[Read title, article text and label]
+  Read --> Check[Validate path, text and category]
+  Check --> EDA[Count documents, classes, words and duplicates]
+  EDA --> Split[Stratified train/test split]
+  Split --> CV[Stratified cross-validation on training portion]
+  CV --> TFIDF[TF-IDF: unigrams and bigrams]
+  TFIDF --> Select[Optional variance or chi-squared feature selection]
+  Select --> Tune[Select best classifier parameters by macro F1]
+  Tune --> Score[Evaluate once on held-out test set]
+  Score --> Save[Save metrics, confusion matrix and joblib artifact]
+  Save --> Register[Register a model version]
+  Register --> Activate[Activate chosen version]
+  Activate --> Predict[Manual or live-news predictions]
+```
+
+The top branch describes the data preparation and training path. The holdout test set is kept outside the cross-validation search: CV tunes parameters using only the training data, and the final metrics are calculated on the held-out portion. Since TF-IDF and feature selection are steps inside the scikit-learn pipeline, they are fitted within each CV fold to avoid learning vocabulary from that fold's validation documents.
+
+### How a live article becomes a saved prediction
+
+```mermaid
+sequenceDiagram
+  participant U as User / Dashboard
+  participant D as Django API
+  participant B as BBC API
+  participant DB as Local database
+  participant K as Kafka
+  participant R as Raw consumer
+  participant C as Classifier consumer
+  participant P as Result consumer
+  U->>D: Import latest headlines
+  D->>B: GET /latest?lang=english
+  B-->>D: Titles, summaries, links, sections
+  D->>DB: Upsert by BBC article URL
+  U->>D: Replay saved headlines
+  D->>K: Publish news.raw events
+  K->>R: Deliver raw event
+  R->>R: Validate BBC URL and clean summary
+  R->>K: Publish preprocessed + classification request
+  K->>C: Deliver classification request
+  C->>C: Load active model and predict category
+  C->>K: Publish category, probabilities, confidence, latency
+  K->>P: Deliver result
+  P->>DB: Idempotently save Prediction by event ID
+  DB-->>U: Prediction history / dashboard metrics
+```
+
+The history of each item has distinct stages: the upstream response creates or refreshes a `LiveNewsItem`; the replay creates Kafka events; the final result consumer creates a `Prediction`. Importing current news does not itself classify it. Kafka replay and the three consumers are separate actions so each stage can be inspected.
+
 ## Requirements
 
 - macOS, Linux, or Windows with WSL2.
@@ -222,9 +274,23 @@ python -m bigdata.cli datasets/raw --output datasets/exports/eda.json
 
 This validates the dataset, reads category labels and text, and writes article counts, per-category counts, vocabulary and related EDA statistics. Data paths under `datasets/` are ignored by Git.
 
+The EDA result is a report, not a newly fabricated training corpus. Each accepted document keeps its text and category label in memory for that command or training run. Stable document IDs are hashes of title and content, which helps identify duplicates. Empty or unlabeled CSV rows are skipped; unsupported/missing datasets fail with a clear error. For folders, only `.txt` documents under the five supported class directories are included.
+
 ### Train a supervised classifier
 
-Start the backend and Celery worker, then use **Model training** in the dashboard. The experiment is queued, executed by Celery, and persisted with status, configuration, metrics, confusion matrix, and artifact path. Register the successful experiment in **Experiment history** and activate its model version in **Model registry** before calling prediction or Kafka classification.
+Start the backend and Celery worker, then use **Model training** in the dashboard. This is the training lifecycle:
+
+1. The API checks the selected algorithm, feature selector, numeric settings and dataset path.
+2. Django inserts an `Experiment` row with `queued` state and the selected configuration.
+3. Celery changes it to `running`, reads labeled articles and creates title-plus-content inputs and category labels.
+4. A deterministic stratified split creates an 80% training partition and 20% held-out test partition by default (the random seed is configurable).
+5. A pipeline cleans text, builds English-stopword-filtered TF-IDF unigram/bigram features, optionally selects features, and applies the classifier.
+6. Stratified CV (five folds by default, reduced when a class is small) evaluates candidate parameters using macro F1. For Naive Bayes, alpha is searched over 0.5, 1.0 and 1.5; for KNN, neighbors are 3, 5 and 7. Baseline uses the most frequent class.
+7. The best pipeline is evaluated on the held-out test data. The app records accuracy, macro precision/recall/F1, per-class report, confusion matrix, run duration and feature counts.
+8. The fitted scikit-learn pipeline is serialized as a joblib artifact. The experiment becomes succeeded or failed and the result appears in the dashboard.
+9. A human selects a successful run to register, then activates a registered version. Prediction endpoints load only the active model within the configured artifact directory.
+
+The experiment is persisted with status, configuration, metrics, confusion matrix, and artifact path. Register the successful experiment in **Experiment history** and activate its model version in **Model registry** before calling prediction or Kafka classification.
 
 Available algorithms are majority baseline, Multinomial Naive Bayes, and KNN. The text pipeline includes cleanup and TF-IDF vectorization; supported selectors are none, variance, and chi-squared. Metrics include classification reports and macro F1. A synchronous CLI example from `backend/`:
 
