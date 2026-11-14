@@ -9,7 +9,8 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
-from bigdata.ingestion.bbc import DatasetError, inspect_dataset
+from bigdata.ingestion.bbc import DatasetError
+from bigdata.spark.data import read_articles
 from bigdata.spark.session import create_spark_session
 from bigdata.spark.topics import fit_lda_topics
 
@@ -22,16 +23,14 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=PROJECT_DIR / "datasets/exports/topics.json")
     parser.add_argument("--model-path", type=Path, default=PROJECT_DIR / "ml_artifacts/topics/lda")
     args = parser.parse_args()
-    try:
-        records = inspect_dataset(args.dataset)["articles"]
-    except DatasetError as exc:
-        parser.error(str(exc))
-    from bigdata.ingestion.bbc import Article
-
-    articles = [Article(**row) for row in records]
+    if not args.dataset.expanduser().exists():
+        parser.error(f"Dataset path does not exist: {args.dataset}")
     spark = create_spark_session("news-intelligence-lda")
     try:
+        articles = read_articles(spark, args.dataset)
         result = fit_lda_topics(spark, articles, args.model_path, num_topics=args.topics, max_iter=args.iterations)
+    except DatasetError as exc:
+        parser.error(str(exc))
     finally:
         spark.stop()
     args.output.parent.mkdir(parents=True, exist_ok=True)
