@@ -24,6 +24,7 @@ from .services import activate_model, register_experiment
 from .tasks import train_experiment_task, train_topics_task
 
 logger = logging.getLogger(__name__)
+TRAINING_ALGORITHMS = ALGORITHMS | {"spark_naive_bayes"}
 
 
 def _body(request) -> dict:
@@ -71,8 +72,8 @@ def train(request):
         return JsonResponse({"error": str(exc)}, status=400)
     algorithm = str(data.get("algorithm", "naive_bayes"))
     selector = str(data.get("selector", "none"))
-    if algorithm not in ALGORITHMS or selector not in SELECTORS:
-        return JsonResponse({"error": "algorithm must be baseline, naive_bayes, or knn; selector must be none, variance, or chi2."}, status=400)
+    if algorithm not in TRAINING_ALGORITHMS or selector not in SELECTORS:
+        return JsonResponse({"error": "algorithm must be baseline, naive_bayes, spark_naive_bayes, or knn; selector must be none, variance, or chi2."}, status=400)
     try:
         configuration = {
             "selector": selector,
@@ -84,6 +85,14 @@ def train(request):
         }
     except (TypeError, ValueError):
         return JsonResponse({"error": "Training configuration values must be numeric."}, status=400)
+    if not 0.05 <= configuration["test_size"] <= 0.5:
+        return JsonResponse({"error": "test_size must be between 0.05 and 0.5."}, status=400)
+    if not 2 <= configuration["folds"] <= 10:
+        return JsonResponse({"error": "folds must be between 2 and 10."}, status=400)
+    if not 100 <= configuration["max_features"] <= 50000:
+        return JsonResponse({"error": "max_features must be between 100 and 50000."}, status=400)
+    if not 1 <= configuration["k_features"] <= configuration["max_features"]:
+        return JsonResponse({"error": "k_features must be positive and no greater than max_features."}, status=400)
     if not settings.BBC_DATASET_PATH.exists():
         return JsonResponse({"error": f"BBC dataset path not found: {settings.BBC_DATASET_PATH}"}, status=422)
     experiment = Experiment.objects.create(

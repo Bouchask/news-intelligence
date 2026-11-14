@@ -4,12 +4,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from bigdata.ingestion.bbc import Article
+from bigdata.spark.data import clean_text_column, read_articles
 
 
 def fit_lda_topics(
     spark: Any,
-    articles: list[Article],
+    articles: Any,
     artifact_path: str | Path,
     *,
     num_topics: int = 8,
@@ -19,22 +19,31 @@ def fit_lda_topics(
 ) -> dict[str, Any]:
     if not 2 <= num_topics <= 30:
         raise ValueError("num_topics must be between 2 and 30.")
-    if not articles:
+    if isinstance(articles, (str, Path)):
+        frame = read_articles(spark, articles)
+    elif hasattr(articles, "select"):
+        frame = articles
+    else:
+        rows = [(item.document_id, item.title, item.content, item.category) for item in articles]
+        frame = spark.createDataFrame(rows, ["document_id", "title", "content", "category"])
+    frame = frame.dropDuplicates(["document_id"])
+    if frame.limit(1).count() == 0:
         raise ValueError("At least one article is required for topic modeling.")
 
     from pyspark.ml import Pipeline
     from pyspark.ml.clustering import LDA
     from pyspark.ml.feature import CountVectorizer, RegexTokenizer, StopWordsRemover
+    from pyspark.ml.functions import vector_to_array
+    from pyspark.sql import functions as F
 
-    rows = [(article.document_id, f"{article.title} {article.content}") for article in articles]
-    frame = spark.createDataFrame(rows, ["document_id", "text"])
+    rows = frame.select("document_id", clean_text_column(F.concat_ws(" ", "title", "content")).alias("text"))
     pipeline = Pipeline(stages=[
         RegexTokenizer(inputCol="text", outputCol="tokens", pattern=r"(?U)\b[a-zA-Z][a-zA-Z]+\b", toLowercase=True),
         StopWordsRemover(inputCol="tokens", outputCol="filtered_tokens"),
         CountVectorizer(inputCol="filtered_tokens", outputCol="term_counts", vocabSize=vocabulary_size, minDF=2.0),
         LDA(k=num_topics, maxIter=max_iter, featuresCol="term_counts", seed=random_state, optimizer="online"),
     ])
-    model = pipeline.fit(frame)
+    model = pipeline.fit(rows)
     lda_model = model.stages[-1]
     vectorizer_model = model.stages[-2]
     vocabulary = vectorizer_model.vocabulary
@@ -47,20 +56,20 @@ def fit_lda_topics(
                 for index, weight in zip(row["termIndices"], row["termWeights"])
             ],
         })
-    distributions = [
-        {"document_id": row["document_id"], "distribution": [float(value) for value in row["topicDistribution"]]}
-        for row in model.transform(frame).select("document_id", "topicDistribution").collect()
-    ]
     output = Path(artifact_path).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     model.write().overwrite().save(str(output))
+    distribution_path = output.with_name(output.name + ".distributions.parquet")
+    model.transform(rows).select(
+        "document_id", vector_to_array("topicDistribution").alias("topic_distribution"),
+    ).write.mode("overwrite").parquet(str(distribution_path))
     return {
         "algorithm": "spark_mllib_lda",
         "num_topics": num_topics,
         "max_iter": max_iter,
-        "document_count": len(articles),
+        "document_count": frame.count(),
         "vocabulary_size": len(vocabulary),
         "topics": topic_terms,
-        "document_distributions": distributions,
+        "distribution_path": str(distribution_path),
         "artifact_path": str(output),
     }

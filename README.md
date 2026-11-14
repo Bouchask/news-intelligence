@@ -3,7 +3,7 @@
 **Created by Yahya Bouchak**
 Local development project for BBC news ingestion, big data exploration, machine learning and live event processing.
 
-News Intelligence is a full-stack application. A React dashboard calls a Django API. The API stores news snapshots and experiment metadata in SQLite (or optional PostgreSQL), queues longer jobs with Celery and Redis, and can publish saved BBC summaries to Kafka for classification. Python/scikit-learn handles supervised text classification; PySpark provides batch EDA and LDA topic modelling.
+News Intelligence is a full-stack application. A React dashboard calls a Django API. The API stores news snapshots and experiment metadata in SQLite (or optional PostgreSQL), queues longer jobs with Celery and Redis, and can publish saved BBC summaries to Kafka for classification. PySpark DataFrames provide distributed corpus reads and EDA; Spark MLlib provides supervised Multinomial Naive Bayes and unsupervised LDA. scikit-learn provides the comparable local models and KNN.
 
 > **Data note:** the live feed uses an independent, unofficial BBC News API. It returns headline metadata and summaries; it is not the BBC, may change or be unavailable, and does not provide a guaranteed full article body or publication time. The project's historical five-class labels are `business`, `entertainment`, `politics`, `sport`, and `tech`. Live classifier predictions are model inferences, not BBC editorial labels.
 
@@ -31,7 +31,7 @@ News Intelligence is a full-stack application. A React dashboard calls a Django 
 ## Features
 
 - Import labeled historical articles from category folders or CSV and calculate dataset EDA.
-- Run Spark SQL EDA and Spark MLlib LDA topic modelling.
+- Run distributed Spark SQL EDA and Spark MLlib classification and LDA topic modelling.
 - Train majority baseline, Multinomial Naive Bayes, or KNN text classifiers with TF-IDF and optional feature selection.
 - Compare experiments, register model versions, activate a version, and classify text through the API.
 - Fetch and save current BBC headline metadata and summaries on demand.
@@ -131,7 +131,7 @@ The history of each item has distinct stages: the upstream response creates or r
 - Python 3.12 recommended for the pinned Python stack.
 - Node.js and npm for the dashboard.
 - Docker Desktop / Docker Engine with Compose v2 for Redis and Kafka.
-- Java 21 and a compatible Spark installation for Spark jobs. The installed stack in the development environment used Spark/PySpark 4.2.
+- Java 17 or newer and PySpark 4.2 (Spark 4 requires Java 17+).
 - A labeled news dataset for supervised training. No historical article corpus is committed here.
 
 SQLite is the default database and requires no extra service. PostgreSQL is optional. Redis is needed for queued model/topic jobs. Kafka is only needed for the streaming classification flow.
@@ -274,7 +274,7 @@ python -m bigdata.cli datasets/raw --output datasets/exports/eda.json
 
 This validates the dataset, reads category labels and text, and writes article counts, per-category counts, vocabulary and related EDA statistics. Data paths under `datasets/` are ignored by Git.
 
-The EDA result is a report, not a newly fabricated training corpus. Each accepted document keeps its text and category label in memory for that command or training run. Stable document IDs are hashes of title and content, which helps identify duplicates. Empty or unlabeled CSV rows are skipped; unsupported/missing datasets fail with a clear error. For folders, only `.txt` documents under the five supported class directories are included.
+The EDA result is a report, not a newly fabricated training corpus. The plain-Python command reads articles into the local process. Empty or unlabeled CSV rows are skipped; unsupported/missing datasets fail with a clear error. For folders, only `.txt` documents under the five supported class directories are included.
 
 ### Train a supervised classifier
 
@@ -292,7 +292,19 @@ Start the backend and Celery worker, then use **Model training** in the dashboar
 
 The experiment is persisted with status, configuration, metrics, confusion matrix, and artifact path. Register the successful experiment in **Experiment history** and activate its model version in **Model registry** before calling prediction or Kafka classification.
 
-Available algorithms are majority baseline, Multinomial Naive Bayes, and KNN. The text pipeline includes cleanup and TF-IDF vectorization; supported selectors are none, variance, and chi-squared. Metrics include classification reports and macro F1. A synchronous CLI example from `backend/`:
+Available algorithms are Spark MLlib Multinomial Naive Bayes, scikit-learn Multinomial Naive Bayes, scikit-learn KNN, and the majority-class baseline. For the Spark choice, the CSV or article files are read by Spark into a distributed DataFrame and stay distributed through splitting, tokenization, vocabulary/IDF fitting, feature selection, classifier fitting and evaluation. Only small category/metric summaries are collected on the driver. Spark's `ChiSqSelector` implements chi-squared selection; variance selection is computed from distributed Spark ML vector statistics and applied with `VectorSlicer`.
+
+The Spark classifier makes a deterministic stratified 80/20 split using per-category window ranks. It assigns each training class to five balanced cross-validation folds explicitly (reducing the fold count if the smallest class requires it), avoiding Spark CrossValidator's non-stratified default. Each fold fits its own tokenizer/vocabulary/IDF/selector on the fold's training rows only, then selects the smoothing value with the best macro F1. The final model is fitted on the full training split and scored once on the untouched test split. It records accuracy, macro precision/recall/F1, per-class metrics, confusion matrix, CV scores and selected-feature counts.
+
+Spark MLlib's fitted pipeline is saved as a native Spark model directory. A compact, compatible inference artifact is also saved for the existing model registry and API: it carries the learned vocabulary, IDF, feature selection, class priors and NB feature log-probabilities, so API and Kafka predictions do not launch a new Spark session for every article. The scikit-learn branch uses its own TF-IDF pipeline and GridSearchCV; it remains useful for comparison and KNN.
+
+Use **Spark MLlib · Multinomial Naive Bayes (distributed)** in **Model training** to run the distributed classifier through Celery. For a synchronous local run from `backend/`:
+
+```sh
+python manage.py train_model --algorithm spark_naive_bayes --selector chi2
+```
+
+The original scikit-learn command remains available:
 
 ```sh
 python manage.py train_model --algorithm naive_bayes --selector none
@@ -302,15 +314,23 @@ Artifacts are written to `ml_artifacts/` and are not committed. Only activate ar
 
 ### Spark analytics and topics
 
-For Spark EDA, configure Java and PySpark, then from repository root:
+The Spark-specific EDA command reads text files/CSV directly as Spark DataFrames; it does not first materialize the full corpus as Python Article objects. Configure Java and PySpark, then from repository root:
 
 ```sh
-export JAVA_HOME="$(/usr/libexec/java_home -v 21)"
+export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
 export PYSPARK_PYTHON="$(pwd)/.venv/bin/python"
-spark-submit bigdata/spark_cli.py datasets/raw --output datasets/exports/spark_eda.json
+python bigdata/spark_cli.py datasets/raw --output datasets/exports/spark_eda.json
 ```
 
-For topic modelling, start the Celery worker with a working Spark/JDK runtime and choose **Features & topics** in the dashboard. The API queues a Spark MLlib LDA job; status/results are saved as a topic run. The fact that PySpark is installed does not itself mean that a Spark job completed; inspect the job status and worker logs.
+For topic modelling directly in the terminal:
+
+```sh
+python bigdata/spark_topics_cli.py datasets/raw --topics 8 --iterations 30
+```
+
+LDA uses Spark MLlib `CountVectorizer` term counts (nonnegative, as required by LDA), learns the topic model, returns the top terms per topic, saves the native model artifact, and writes all per-document topic distributions to a distributed Parquet dataset. The app does not collect the entire corpus or all distributions back to the driver.
+
+For queued topic modelling, start the Celery worker with a working Spark/JDK runtime and choose **Features & topics** in the dashboard. The API queues a Spark MLlib LDA job; status and summary results are saved as a topic run. The fact that PySpark is installed does not itself mean that a Spark job completed; run the command above or inspect job status and worker logs.
 
 ## Import current BBC news
 
@@ -360,7 +380,7 @@ Topic stages: `news.raw` → `news.preprocessed` and `news.classification.reques
 - **Ingestion / BBC Live Feed:** import current headlines and open their source links.
 - **Preprocessing:** inspect the text-cleaning/tokenization pipeline.
 - **Features & topics:** submit Spark LDA topic jobs and inspect saved runs.
-- **Model training:** queue classification experiments and monitor completion.
+- **Model training:** queue Spark MLlib NB, scikit-learn NB/KNN, or baseline experiments and monitor completion.
 - **Model comparison / Experiment history:** review metrics and register a completed model.
 - **Model registry:** inspect versions and activate a trusted version.
 - **Predictions:** classify provided text and inspect prediction history.
@@ -447,13 +467,13 @@ Check network/DNS connectivity and retry the independent upstream API. It can be
 
 ### Spark driver or Java failure
 
-Check Java 21, `JAVA_HOME`, PySpark/Spark compatibility, and worker logs. Spark creates local driver sockets; sandbox/firewall restrictions can prevent startup even when Spark is installed.
+Check Java 17+, `JAVA_HOME`, PySpark/Spark compatibility, and worker logs. Spark creates local driver sockets; sandbox/firewall restrictions can prevent startup even when Spark is installed. In the project directory with `.venv` active, run `python bigdata/spark_cli.py datasets/raw` for the simplest runtime probe.
 
 More runbook notes are in [docs/operations.md](docs/operations.md).
 
 ## Validation and current limits
 
-Validated during development: `docker compose config --quiet`, Django system checks and migrations, API smoke requests, dataset EDA on 2,225 local corpus articles, and the frontend production build (`npm run build`). The Docker daemon must be running to validate container health and execute an actual Kafka round trip. Spark jobs likewise require a host that permits the Spark driver to bind local sockets.
+Validated during development: `docker compose config --quiet`, Django system checks and migrations, API smoke requests, Python EDA on 2,225 local corpus articles, and the frontend production build (`npm run build`). A Spark EDA run was attempted, but this execution sandbox denied Py4J's localhost socket bind (`Operation not permitted`); consequently the Spark EDA, distributed classifier and LDA could not be runtime-verified here. Run the Spark commands above on the host, where the Java gateway can bind local sockets. The Docker daemon must similarly be available to validate container health and execute an actual Kafka round trip.
 
 This repository is a development project, not a production deployment recipe. Before public hosting, add authentication/authorization, production settings and secret management, HTTPS, monitored persistent storage, a secured Kafka cluster, backups, and appropriate data-source licensing controls.
 

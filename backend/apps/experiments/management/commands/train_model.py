@@ -3,6 +3,8 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from bigdata.classification.train import ALGORITHMS, SELECTORS, train_experiment
+from bigdata.spark.classification import train_spark_naive_bayes
+from bigdata.spark.session import create_spark_session
 
 from apps.experiments.models import Experiment
 
@@ -11,7 +13,7 @@ class Command(BaseCommand):
     help = "Run one reproducible BBC classification experiment in the foreground (no Redis/Celery required)."
 
     def add_arguments(self, parser):
-        parser.add_argument("--algorithm", choices=sorted(ALGORITHMS), default="naive_bayes")
+        parser.add_argument("--algorithm", choices=sorted(ALGORITHMS | {"spark_naive_bayes"}), default="naive_bayes")
         parser.add_argument("--selector", choices=sorted(SELECTORS), default="none")
 
     def handle(self, *args, **options):
@@ -24,13 +26,23 @@ class Command(BaseCommand):
             started_at=timezone.now(),
         )
         try:
-            result = train_experiment(
-                dataset_path=experiment.dataset_path,
-                artifact_root=settings.MODEL_ARTIFACT_DIR,
-                experiment_id=str(experiment.pk),
-                algorithm=experiment.algorithm,
-                selector=options["selector"],
-            )
+            if experiment.algorithm == "spark_naive_bayes":
+                spark = create_spark_session("news-intelligence-spark-nb")
+                try:
+                    result = train_spark_naive_bayes(
+                        spark, experiment.dataset_path, settings.MODEL_ARTIFACT_DIR,
+                        str(experiment.pk), selector=options["selector"],
+                    )
+                finally:
+                    spark.stop()
+            else:
+                result = train_experiment(
+                    dataset_path=experiment.dataset_path,
+                    artifact_root=settings.MODEL_ARTIFACT_DIR,
+                    experiment_id=str(experiment.pk),
+                    algorithm=experiment.algorithm,
+                    selector=options["selector"],
+                )
         except Exception as exc:
             experiment.status = Experiment.Status.FAILED
             experiment.error_message = str(exc)[:4000]

@@ -158,6 +158,15 @@ def train_experiment(
 
 def predict_with_artifact(artifact_path: str | Path, text: str) -> dict[str, Any]:
     artifact = joblib.load(artifact_path)
+    if artifact.get("kind") == "spark_mllib_naive_bayes":
+        inference = artifact["inference"]
+        probabilities = inference.predict_proba([text])[0]
+        index = int(probabilities.argmax())
+        return {
+            "category": inference.labels[index],
+            "confidence": float(probabilities[index]),
+            "probabilities": {label: float(probability) for label, probability in zip(inference.labels, probabilities)},
+        }
     pipeline = artifact["pipeline"]
     predicted = str(pipeline.predict([text])[0])
     confidence: float | None = None

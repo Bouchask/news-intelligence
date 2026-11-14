@@ -42,7 +42,9 @@ For processes running inside Compose, use `kafka:19092` as the Kafka bootstrap a
 - **Kafka topics missing:** run `python manage.py create_kafka_topics` after the broker reports healthy.
 - **No active model:** train successfully, register the experiment, and activate its model version before running classifier consumer.
 - **Messages in DLQ:** read `news.raw.dlq` or `news.classification.dlq` using Kafka tools, correct the source/configuration issue, and republish a corrected event. The app does not automatically replay DLQ data.
-- **Spark driver startup:** confirm Java/PySpark compatibility and local socket binding. PySpark being installed is not proof that a Spark job has completed successfully.
+- **Spark driver startup:** confirm Java 17+, PySpark/Spark compatibility, and local socket binding. Run `python bigdata/spark_cli.py PATH` from the repository root as a runtime check. PySpark being installed is not proof that a Spark job has completed successfully.
+- **Spark classifier unavailable:** ensure the frontend selects Spark MLlib Naive Bayes, the corpus has at least two labeled classes with enough examples for the requested folds, and the Celery worker can launch Spark. For direct execution, run `python manage.py train_model --algorithm spark_naive_bayes --selector chi2` from `backend/`.
+- **Spark artifacts:** the native Spark pipeline is saved under `ml_artifacts/spark_naive_bayes/`; a compact serving artifact beside it is used by registered model prediction APIs and Kafka consumers. LDA distributions are written as Parquet directories under the topic artifact path.
 
 ## Local data and privacy
 

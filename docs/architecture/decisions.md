@@ -1,6 +1,6 @@
 # Initial architecture decisions
 
-1. **Reuse the installed Spark distribution.** The host has Spark 4.2.0, so the project must verify that version's PySpark APIs instead of installing Spark 3 over it. The Spark runner bundles PySpark libraries; ordinary Python interpreters cannot currently import them.
+1. **Use the pinned PySpark distribution in the project environment.** The project environment pins PySpark 4.2.0, matching the host Spark release observed during the initial audit. Spark jobs read data to DataFrames directly; they do not first load the full corpus into driver-side Python objects. Java 17 or later is required.
 2. **Use Python 3.12 for the application environment.** Python 3.12 is installed alongside 3.14 and provides a wider compatibility window for Django and scientific Python dependencies.
 3. **Keep corpus inspection independent of Spark.** Dataset format detection and stable IDs use the Python standard library, so the input can be validated before starting a Spark job. Distributed summaries are provided through the Spark SQL module.
 4. **Use SQLite as the initial API default and PostgreSQL through configuration.** This lets the API shell start locally without assuming that a PostgreSQL server is running. `DATABASE_URL` switches to PostgreSQL.
@@ -10,5 +10,7 @@
 ## Initial project stages
 
 - Foundation: monorepo, Django API shell, health endpoint, frontend shell.
-- Dataset: CSV/category-folder discovery, stable IDs, real corpus summary, Spark EDA entry point.
-- Later stages: Spark NLP/ML, experiment registry, Kafka streaming, broader API integration, infrastructure and deployment.
+- Dataset: CSV/category-folder discovery, stable IDs, corpus summaries, and Spark DataFrame readers.
+- ML: Spark SQL EDA, MLlib Naive Bayes with stratified CV and held-out metrics, MLlib LDA with Parquet topic distributions, and scikit-learn comparison models.
+- Backend/dashboard: asynchronous experiment/topic jobs, registered model serving, live BBC metadata import, Kafka replay and prediction consumers.
+- Runtime caveat: local sandbox denied Java's Py4J socket bind during Spark smoke run; a normal host shell with local socket access is needed to verify actual Spark execution.

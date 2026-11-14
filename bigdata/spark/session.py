@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any
 
 
@@ -15,7 +16,8 @@ def create_spark_session(app_name: str | None = None) -> Any:
         ) from exc
 
     builder = SparkSession.builder.appName(app_name or os.getenv("SPARK_APP_NAME", "news-intelligence"))
-    master = os.getenv("SPARK_MASTER")
-    if master:
-        builder = builder.master(master)
+    builder = builder.master(os.getenv("SPARK_MASTER", "local[*]"))
+    python_executable = os.getenv("PYSPARK_PYTHON", sys.executable)
+    builder = builder.config("spark.pyspark.python", python_executable)
+    builder = builder.config("spark.pyspark.driver.python", python_executable)
     return builder.getOrCreate()
