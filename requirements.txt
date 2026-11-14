@@ -1,0 +1,21 @@
+# Shared local environment for the API and Big Data modules.
+-r backend/requirements.txt
+
+# Match the Spark distribution already installed through Homebrew.
+pyspark==4.2.0
+
+# NLP, feature processing, and analysis.
+numpy>=2.1,<3
+pandas>=2.2,<4
+scipy>=1.14,<2
+scikit-learn>=1.5,<2
+spacy>=3.8,<4
+nltk>=3.9,<4
+matplotlib>=3.9,<4
+seaborn>=0.13,<1
+pyarrow>=18,<25
+
+# Streaming client and local development checks.
+kafka-python-ng>=2.2,<3
+pytest>=8.3,<10
+pytest-django>=4.9,<5
